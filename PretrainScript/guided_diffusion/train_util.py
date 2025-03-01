@@ -89,6 +89,7 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
+            logger.log(f"using CUDA device {dist_util.dev()}\tDDP: {dist.is_initialized()}")
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
@@ -121,6 +122,7 @@ class TrainLoop:
                 )
 
         dist_util.sync_params(self.model.parameters())
+        logger.log("model loaded and synced")
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
