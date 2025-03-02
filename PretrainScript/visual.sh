@@ -1,0 +1,2 @@
+# 显示更多图像，并保存到文件
+python visualSampledResult.py --npz_path /home/wyh/wyhHDD/DiffusionProject/Result/FinetuneV2/samplling/samples_100x256x256x3.npz --num_images 25 --grid_size 5,5 --save_path /home/wyh/wyhHDD/DiffusionProject/Result/FinetuneV2/samplling/output.png

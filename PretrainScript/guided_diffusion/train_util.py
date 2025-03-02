@@ -7,6 +7,7 @@ import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+import wandb
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
@@ -38,6 +39,8 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        project_wandb=None,
+        exp_name_wandb=None
     ):
         self.model = model
         self.diffusion = diffusion
@@ -89,7 +92,6 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            logger.log(f"using CUDA device {dist_util.dev()}\tDDP: {dist.is_initialized()}")
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
@@ -107,6 +109,26 @@ class TrainLoop:
                 )
             self.use_ddp = False
             self.ddp_model = self.model
+        
+        if project_wandb is not None and exp_name_wandb is not None:
+            wandb.init(
+                project=project_wandb, 
+                name=exp_name_wandb,
+                settings=wandb.Settings(base_dir=get_blob_logdir())
+            )
+            wandb.config.update({
+                "batch_size": self.batch_size,
+                "microbatch": self.microbatch,
+                "lr": self.lr,
+                "ema_rate": self.ema_rate,
+                "log_interval": self.log_interval,
+                "save_interval": self.save_interval,
+                "resume_checkpoint": self.resume_checkpoint,
+                "use_fp16": self.use_fp16,
+                "fp16_scale_growth": self.fp16_scale_growth,
+                "weight_decay": self.weight_decay,
+                "lr_anneal_steps": self.lr_anneal_steps
+            })
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -230,6 +252,11 @@ class TrainLoop:
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+        # Add wandb logging
+        wandb.log({
+            "step": self.step + self.resume_step,
+            "samples": (self.step + self.resume_step + 1) * self.global_batch,
+        })
 
     def save(self):
         def save_checkpoint(rate, params):
@@ -301,3 +328,4 @@ def log_loss_dict(diffusion, ts, losses):
         for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
             quartile = int(4 * sub_t / diffusion.num_timesteps)
             logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
+            wandb.log({f"{key}_q{quartile}": sub_loss})
