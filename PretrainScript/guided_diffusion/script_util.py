@@ -46,6 +46,8 @@ def model_and_diffusion_defaults():
     """
     res = dict(
         image_size=64,
+        in_channels=3,
+        out_channels=3,
         num_channels=128,
         num_res_blocks=2,
         num_heads=4,
@@ -73,6 +75,8 @@ def classifier_and_diffusion_defaults():
 
 def create_model_and_diffusion(
     image_size,
+    in_channels,
+    out_channels,
     class_cond,
     learn_sigma,
     num_channels,
@@ -113,6 +117,8 @@ def create_model_and_diffusion(
         resblock_updown=resblock_updown,
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
+        in_channels=in_channels,
+        out_channels=out_channels,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -144,6 +150,8 @@ def create_model(
     resblock_updown=False,
     use_fp16=False,
     use_new_attention_order=False,
+    in_channels=3,
+    out_channels=3,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -165,9 +173,9 @@ def create_model(
 
     return UNetModel(
         image_size=image_size,
-        in_channels=3,
+        in_channels=in_channels,
         model_channels=num_channels,
-        out_channels=(3 if not learn_sigma else 6),
+        out_channels=(out_channels if not learn_sigma else out_channels * 2),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,

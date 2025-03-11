@@ -40,7 +40,8 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
         project_wandb=None,
-        exp_name_wandb=None
+        exp_name_wandb=None,
+        finetune_flag=False
     ):
         self.model = model
         self.diffusion = diffusion
@@ -67,6 +68,7 @@ class TrainLoop:
         self.global_batch = self.batch_size * dist.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
+        self.finetune_flag = finetune_flag
 
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
@@ -78,6 +80,7 @@ class TrainLoop:
         self.opt = AdamW(
             self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
         )
+        
         if self.resume_step:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
@@ -110,11 +113,11 @@ class TrainLoop:
             self.use_ddp = False
             self.ddp_model = self.model
         
-        if project_wandb is not None and exp_name_wandb is not None:
+        if project_wandb is not None and exp_name_wandb is not None and dist.get_rank() == 0:
             wandb.init(
                 project=project_wandb, 
                 name=exp_name_wandb,
-                settings=wandb.Settings(base_dir=get_blob_logdir())
+                dir=get_blob_logdir()
             )
             wandb.config.update({
                 "batch_size": self.batch_size,
@@ -129,6 +132,7 @@ class TrainLoop:
                 "weight_decay": self.weight_decay,
                 "lr_anneal_steps": self.lr_anneal_steps
             })
+                
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -137,14 +141,71 @@ class TrainLoop:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-                self.model.load_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
-                    )
+                state_dict = dist_util.load_state_dict(
+                    resume_checkpoint, map_location=dist_util.dev()
                 )
+                
+                if not self.finetune_flag:
+                    self.model.load_state_dict(state_dict)
+                else:
+                    # 预处理状态字典，处理形状不匹配的情况
+                    filtered_state_dict = {}
+                    shape_mismatch_keys = []
+                    
+                    # 检查模型参数与加载的状态字典
+                    model_state = self.model.state_dict()
+                    for k, v in state_dict.items():
+                        if k in model_state:
+                            if v.shape != model_state[k].shape:
+                                shape_mismatch_keys.append(k)
+                                logger.log(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}")
+                            else:
+                                filtered_state_dict[k] = v
+                        else:
+                            # 键不在模型中，会成为unexpected_keys
+                            filtered_state_dict[k] = v
+                    
+                    # 在微调模式下加载模型，strict=False，并记录警告信息
+                    load_result = self.model.load_state_dict(filtered_state_dict, strict=False)
+                    
+                    # 记录缺失的键(未加载的层)
+                    if load_result.missing_keys:
+                        logger.log(f"Warning: {len(load_result.missing_keys)} missing keys in state_dict:")
+                        for key in load_result.missing_keys:
+                            logger.log(f"  - Missing key (will be randomly initialized): {key}")
+                    
+                    # 记录多余的键(预训练模型中有但当前模型中没有的层)
+                    if load_result.unexpected_keys:
+                        logger.log(f"Warning: {len(load_result.unexpected_keys)} unexpected keys in state_dict:")
+                        for key in load_result.unexpected_keys:
+                            logger.log(f"  - Unexpected key (will be ignored): {key}")
+                    
+                    # 记录形状不匹配的键
+                    if shape_mismatch_keys:
+                        logger.log(f"Warning: {len(shape_mismatch_keys)} shape mismatched keys (will be randomly initialized):")
+                        for key in shape_mismatch_keys:
+                            logger.log(f"  - Shape mismatch key: {key}")
+                    
+                    # 同时记录到wandb日志中
+                    if hasattr(self, 'wandb') and wandb.run is not None:
+                        wandb.log({
+                            "finetune/missing_keys_count": len(load_result.missing_keys),
+                            "finetune/unexpected_keys_count": len(load_result.unexpected_keys),
+                            "finetune/shape_mismatch_count": len(shape_mismatch_keys),
+                        })
+                        # 如果键太多，只记录前10个示例
+                        missing_examples = load_result.missing_keys[:10] if load_result.missing_keys else []
+                        unexpected_examples = load_result.unexpected_keys[:10] if load_result.unexpected_keys else []
+                        shape_mismatch_examples = shape_mismatch_keys[:10] if shape_mismatch_keys else []
+                        
+                        wandb.log({
+                            "finetune/missing_keys_examples": ", ".join(missing_examples),
+                            "finetune/unexpected_keys_examples": ", ".join(unexpected_examples),
+                            "finetune/shape_mismatch_examples": ", ".join(shape_mismatch_examples),
+                        })
 
-        dist_util.sync_params(self.model.parameters())
-        logger.log("model loaded and synced")
+            dist_util.sync_params(self.model.parameters())
+            logger.log("model loaded and synced")
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -192,6 +253,7 @@ class TrainLoop:
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
+        wandb.finish()
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
@@ -248,15 +310,21 @@ class TrainLoop:
         lr = self.lr * (1 - frac_done)
         for param_group in self.opt.param_groups:
             param_group["lr"] = lr
+            
+        # Log the LR
+        if dist.get_rank() == 0:
+            logger.logkv("learning_rate", lr)
+            wandb.log({"learning_rate": lr})
 
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
-        # Add wandb logging
-        wandb.log({
-            "step": self.step + self.resume_step,
-            "samples": (self.step + self.resume_step + 1) * self.global_batch,
-        })
+        # 仅主进程向 wandb 记录
+        if dist.get_rank() == 0:
+            wandb.log({
+                "step": self.step + self.resume_step,
+                "samples": (self.step + self.resume_step + 1) * self.global_batch,
+            })
 
     def save(self):
         def save_checkpoint(rate, params):
@@ -320,12 +388,27 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
         return path
     return None
 
-
 def log_loss_dict(diffusion, ts, losses):
+    # Compute mean loss across all devices
     for key, values in losses.items():
-        logger.logkv_mean(key, values.mean().item())
-        # Log the quantiles (four quartiles, in particular).
+        # Reduce across all processes for accurate loss
+        if dist.is_initialized():
+            values_tensor = values.clone().detach()
+            dist.all_reduce(values_tensor)
+            values_tensor /= dist.get_world_size()
+            mean_value = values_tensor.mean().item()
+        else:
+            mean_value = values.mean().item()
+        
+        logger.logkv_mean(key, mean_value)
+        
+        # Only log to wandb from main process
+        if dist.get_rank() == 0:
+            wandb.log({key: mean_value})
+            
+        # Process quartiles
         for sub_t, sub_loss in zip(ts.cpu().numpy(), values.detach().cpu().numpy()):
             quartile = int(4 * sub_t / diffusion.num_timesteps)
             logger.logkv_mean(f"{key}_q{quartile}", sub_loss)
-            wandb.log({f"{key}_q{quartile}": sub_loss})
+            if dist.get_rank() == 0:
+                wandb.log({f"{key}_q{quartile}": sub_loss})

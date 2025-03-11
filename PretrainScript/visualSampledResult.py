@@ -81,7 +81,7 @@ def main():
         for j in range(cols):
             idx = i * cols + j
             if idx < args.num_images:
-                axes[i, j].imshow(images[idx])
+                axes[i, j].imshow(images[idx], cmap = 'gray')
                 if has_labels and labels is not None and args.show_labels:
                     axes[i, j].set_title(f"Label: {labels[idx]}")
                 axes[i, j].axis('off')

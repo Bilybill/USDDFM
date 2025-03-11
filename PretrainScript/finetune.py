@@ -35,6 +35,7 @@ def main():
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=args.class_cond,
+        input_channels=args.in_channels,
     )
 
     logger.log("training...")
@@ -54,6 +55,9 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        finetune_flag=args.finetuneFlag,
+        project_wandb=args.project_name,
+        exp_name_wandb=args.exp_name
     ).run_loop()
 
 
@@ -74,7 +78,8 @@ def create_argparser():
         fp16_scale_growth=1e-3,
         log_dir="None",
         project_name="",
-        exp_name=""
+        exp_name="",
+        finetuneFlag=False
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

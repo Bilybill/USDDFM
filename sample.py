@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from skimage.io import imsave
 import warnings
-warnings.filterwarnings('ignore')
+# warnings.filterwarnings('ignore')
 
 def image_read(path, mode='RGB'):
     img_BGR = cv2.imread(path).astype('float32')
@@ -32,8 +32,8 @@ def load_yaml(file_path: str) -> dict:
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_config', type=str,default = 'configs/model_config_imagenet.yaml')
-    parser.add_argument('--diffusion_config', type=str,default='configs/diffusion_config.yaml')                     
+    parser.add_argument('--model_config', type=str,default = 'configs/model_config_usdffm.yaml')
+    parser.add_argument('--diffusion_config', type=str,default='configs/diffusion_config_usdffm.yaml')                     
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--save_dir', type=str, default='./output')
     args = parser.parse_args()
@@ -55,7 +55,6 @@ if __name__ == '__main__':
     model = model.to(device)
     model.eval()
 
-  
     # Load diffusion sampler
     sampler = create_sampler(**diffusion_config) 
     sample_fn = partial(sampler.p_sample_loop, model=model)
