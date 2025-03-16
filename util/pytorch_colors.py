@@ -16,6 +16,16 @@ def _generic_transform_sk_4d(transform, in_type='', out_type=''):
     def apply_transform(input_):
         to_squeeze = (input_.dim() == 3)
         device = input_.device
+        # Check if grayscale (1 channel)
+        is_grayscale = (input_.size(1) == 1 if to_squeeze else input_.size(-3) == 1)
+        
+        if is_grayscale:
+            # Option 1: Convert grayscale to 3-channel by repeating
+            if not to_squeeze:
+                input_ = input_.repeat(1, 3, 1, 1) 
+            else:
+                input_ = input_.repeat(3, 1, 1)
+        
         input_ = input_.cpu()
         input_ = _convert(input_, in_type)
 

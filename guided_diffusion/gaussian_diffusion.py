@@ -183,6 +183,7 @@ class GaussianDiffusion:
         """ 
         img = x_start
         device = x_start.device
+        ori_channel = I.shape[1]
 
         pbar = tqdm(list(range(self.num_timesteps))[::-1])
         for idx in pbar:
@@ -193,7 +194,7 @@ class GaussianDiffusion:
            
             HP = EM_Initial(I) if time == torch.tensor([self.num_timesteps-1], device=device) else HP
            
-            out, HP = self.p_sample(x=img, t=time, model=model, bfHP = HP, infrared = I, visible = V, lamb=lamb,rho=rho)
+            out, HP = self.p_sample(x=img, t=time, model=model, bfHP = HP, infrared = I, visible = V, lamb = lamb,rho = rho)
 
 
             img = out['sample'].detach_()
@@ -202,10 +203,9 @@ class GaussianDiffusion:
                 if idx % 1 == 0:
                     file_path = os.path.join(save_root, 'progress', str(img_index))
                     os.makedirs(file_path) if not os.path.exists(file_path) else file_path
-
-                    temp_img= img.detach().cpu().squeeze().numpy()
+                    temp_img= img.detach().cpu().squeeze(0).numpy()
                     temp_img=np.transpose(temp_img, (1,2,0))
-                    temp_img=cv2.cvtColor(temp_img,cv2.COLOR_RGB2YCrCb)[:,:,0]
+                    temp_img=cv2.cvtColor(temp_img,cv2.COLOR_RGB2YCrCb)[:,:,0] if ori_channel == 3 else temp_img
                     temp_img=(temp_img-np.min(temp_img))/(np.max(temp_img)-np.min(temp_img))
                     temp_img=((temp_img)*255).astype('uint8')
                     imsave(os.path.join(file_path, "{}.png".format(f"x_{str(idx).zfill(4)}")),temp_img)
@@ -387,11 +387,10 @@ class DDPM(SpacedDiffusion):
 @register_sampler(name='ddim')
 class DDIM(SpacedDiffusion):
     def p_sample(self, model, x, t, bfHP, infrared, visible, lamb,rho,eta=0.0):
-
+        
+        ori_channel = infrared.shape[1]
         out = self.p_mean_variance(model, x, t)
-
-
-
+        
         x_0_hat_ycbcr = rgb_to_ycbcr(out['pred_xstart'])/255 # (-1,1)
         x_0_hat_y = torch.unsqueeze((x_0_hat_ycbcr[:,0,:,:]),1)
         assert x_0_hat_y.shape[1]==1
@@ -403,10 +402,10 @@ class DDIM(SpacedDiffusion):
 
         x_0_hat_ycbcr[:,0,:,:] = x_0_hat_y_BF
         out['pred_xstart'] = ycbcr_to_rgb(x_0_hat_ycbcr*255)
-
+        if ori_channel == 1:
+            out['pred_xstart'] = torch.unsqueeze(out['pred_xstart'][:,0,:,:], 1)
 
         eps = self.predict_eps_from_x_start(x, t, out['pred_xstart'])
-
 
         alpha_bar = extract_and_expand(self.alphas_cumprod, t, x)
         alpha_bar_prev = extract_and_expand(self.alphas_cumprod_prev, t, x)
