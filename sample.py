@@ -127,7 +127,7 @@ if __name__ == "__main__":
                 V=vis_img,
                 save_root=out_path,
                 img_index=os.path.splitext(img_name)[0],
-                lamb=2,
+                lamb=0.5,
                 rho=0.001,
             )
 

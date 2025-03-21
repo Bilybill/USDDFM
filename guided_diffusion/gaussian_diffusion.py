@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 
 from .posterior_mean_variance import get_mean_processor, get_var_processor
 
-from .EM_onestep import EM_Initial,EM_onestep
+from .EM_onestep import EM_Initial,EM_onestep,EM_InitialList,EM_onestepList
 from util.pytorch_colors import rgb_to_ycbcr, ycbcr_to_rgb
 from skimage.io import imsave
 import cv2
@@ -210,7 +210,48 @@ class GaussianDiffusion:
                     temp_img=((temp_img)*255).astype('uint8')
                     imsave(os.path.join(file_path, "{}.png".format(f"x_{str(idx).zfill(4)}")),temp_img)
  
-        return img       
+        return img
+    
+    def p_sample_loop_msource(self,
+                      model,
+                      x_start, 
+                      record, 
+                      Ilist, 
+                      save_root,
+                      img_index, lamb,rho):
+        """
+        The function used for sampling from noise.
+        """ 
+        img = x_start
+        device = x_start.device
+        ori_channel = Ilist.shape[1]
+        K = Ilist.shape[0]
+
+        pbar = tqdm(list(range(self.num_timesteps))[::-1])
+        for idx in pbar:
+            time = torch.tensor([idx] * img.shape[0], device=device)
+            
+            img = img 
+
+            HP = EM_InitialList(Ilist[0][None,...], K) if time == torch.tensor([self.num_timesteps-1], device=device) else HP
+           
+            out, HP = self.p_sample_msource(x=img, t=time, model=model, bfHP = HP, Ilist = Ilist, lamb = lamb,rho = rho)
+
+
+            img = out['sample'].detach_()
+           
+            if record:
+                if idx % 1 == 0:
+                    file_path = os.path.join(save_root, 'progress', str(img_index))
+                    os.makedirs(file_path) if not os.path.exists(file_path) else file_path
+                    temp_img= img.detach().cpu().squeeze(0).numpy()
+                    temp_img=np.transpose(temp_img, (1,2,0))
+                    temp_img=cv2.cvtColor(temp_img,cv2.COLOR_RGB2YCrCb)[:,:,0] if ori_channel == 3 else temp_img
+                    temp_img=(temp_img-np.min(temp_img))/(np.max(temp_img)-np.min(temp_img))
+                    temp_img=((temp_img)*255).astype('uint8')
+                    imsave(os.path.join(file_path, "{}.png".format(f"x_{str(idx).zfill(4)}")),temp_img)
+ 
+        return img 
         
     def p_sample(self, model, x, t):
         raise NotImplementedError
@@ -417,6 +458,46 @@ class DDIM(SpacedDiffusion):
 
         noise = torch.randn_like(x)
 
+        mean_pred = (
+            out["pred_xstart"] * torch.sqrt(alpha_bar_prev)
+            + torch.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        )
+
+        sample = mean_pred
+        if t != 0:
+            sample += sigma * noise
+        
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}, bfHP
+    
+    def p_sample_msource(self, model, x, t, bfHP, Ilist, lamb,rho,eta=0.0):
+        
+        ori_channel = Ilist.shape[1]
+        out = self.p_mean_variance(model, x, t)
+        
+        x_0_hat_ycbcr = rgb_to_ycbcr(out['pred_xstart'])/255 # (-1,1)
+        x_0_hat_y = torch.unsqueeze((x_0_hat_ycbcr[:,0,:,:]),1)
+        assert x_0_hat_y.shape[1]==1
+
+        x_0_hat_y_BF, bfHP = EM_onestepList(f_pre = x_0_hat_y,
+                                            IList=Ilist,
+                                            HyperP = bfHP,lamb=lamb,rho=rho)
+
+        x_0_hat_ycbcr[:,0,:,:] = x_0_hat_y_BF
+        out['pred_xstart'] = ycbcr_to_rgb(x_0_hat_ycbcr*255)
+        if ori_channel == 1:
+            out['pred_xstart'] = torch.unsqueeze(out['pred_xstart'][:,0,:,:], 1)
+
+        eps = self.predict_eps_from_x_start(x, t, out['pred_xstart'])
+
+        alpha_bar = extract_and_expand(self.alphas_cumprod, t, x)
+        alpha_bar_prev = extract_and_expand(self.alphas_cumprod_prev, t, x)
+        sigma = (
+            eta
+            * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * torch.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+
+        noise = torch.randn_like(x)
 
         mean_pred = (
             out["pred_xstart"] * torch.sqrt(alpha_bar_prev)
@@ -433,6 +514,57 @@ class DDIM(SpacedDiffusion):
         coef1 = extract_and_expand(self.sqrt_recip_alphas_cumprod, t, x_t)
         coef2 = extract_and_expand(self.sqrt_recipm1_alphas_cumprod, t, x_t)
         return (coef1 * x_t - pred_xstart) / coef2
+
+
+@register_sampler(name='ddimmultifusion')
+class DDIMMulFusion(SpacedDiffusion):
+    def p_sample(self, model, x, t, bfHP, infrared, visible, lamb,rho,eta=0.0):
+        
+        ori_channel = infrared.shape[1]
+        out = self.p_mean_variance(model, x, t)
+        
+        x_0_hat_ycbcr = rgb_to_ycbcr(out['pred_xstart'])/255 # (-1,1)
+        x_0_hat_y = torch.unsqueeze((x_0_hat_ycbcr[:,0,:,:]),1)
+        assert x_0_hat_y.shape[1]==1
+
+        x_0_hat_y_BF, bfHP = EM_onestep(f_pre = x_0_hat_y,
+                                            I = infrared,
+                                            V = visible,
+                                            HyperP = bfHP,lamb=lamb,rho=rho)
+
+        x_0_hat_ycbcr[:,0,:,:] = x_0_hat_y_BF
+        out['pred_xstart'] = ycbcr_to_rgb(x_0_hat_ycbcr*255)
+        if ori_channel == 1:
+            out['pred_xstart'] = torch.unsqueeze(out['pred_xstart'][:,0,:,:], 1)
+
+        eps = self.predict_eps_from_x_start(x, t, out['pred_xstart'])
+
+        alpha_bar = extract_and_expand(self.alphas_cumprod, t, x)
+        alpha_bar_prev = extract_and_expand(self.alphas_cumprod_prev, t, x)
+        sigma = (
+            eta
+            * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * torch.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+
+        noise = torch.randn_like(x)
+
+        mean_pred = (
+            out["pred_xstart"] * torch.sqrt(alpha_bar_prev)
+            + torch.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        )
+
+        sample = mean_pred
+        if t != 0:
+            sample += sigma * noise
+        
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}, bfHP
+
+    def predict_eps_from_x_start(self, x_t, t, pred_xstart):
+        coef1 = extract_and_expand(self.sqrt_recip_alphas_cumprod, t, x_t)
+        coef2 = extract_and_expand(self.sqrt_recipm1_alphas_cumprod, t, x_t)
+        return (coef1 * x_t - pred_xstart) / coef2
+
 
 
 # =================
